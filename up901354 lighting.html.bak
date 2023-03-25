@@ -1,0 +1,1206 @@
+<!DOCTYPE HTML> 
+<html lang="en"> 
+<head>
+<title> Satellite animation </title>
+<script src="webgl-debug.js"></script>
+<script type="text/javascript" src="glMatrix.js"></script>
+<script src="webgl-utils.js"></script>
+<meta charset="utf-8"> 
+
+<script id="shader-vs" type="x-shader/x-vertex">
+
+ attribute vec3 aVertexPosition;
+ attribute vec3 aVertexNormal;
+ attribute vec2 aTextureCoordinates;
+ uniform mat4 uMVMatrix;
+ uniform mat4 uPMatrix;
+ uniform mat3 uNMatrix;
+ uniform mat3 uVMatrix;
+ uniform vec3 uLightPosition;
+ uniform vec3 uAmbientLightColor;
+ uniform vec3 uDiffuseLightColor;
+ uniform vec3 uSpecularLightColor;
+ uniform vec3 uDirectionalLightColor;
+ varying vec2 vTextureCoordinates;
+ varying vec3 vLightWeighting;
+ 
+ const float shininess = 80.0;
+ void main() {
+// vertex position in eye coordinates and then homogeneous coordinates
+vec4 vertexPositionEye4 = uMVMatrix * vec4(aVertexPosition, 1.0);
+vec3 vertexPositionEye3 = vertexPositionEye4.xyz /
+vertexPositionEye4.w;
+
+// light position in eye coordinates
+vec4 lightPositionEye4 = uMVMatrix * vec4(uLightPosition, 1.0);
+vec3 lightPositionEye3 = lightPositionEye4.xyz /
+lightPositionEye4.w;
+
+
+vec3 vectorToLightSource = normalize(uLightPosition -
+vertexPositionEye3);
+// normal in eye coordinates
+vec3 normalEye = normalize(uNMatrix * aVertexNormal);
+
+// light position in eye coordinates
+vec3 normalizedLightPos = normalize(uLightPosition * uVMatrix);
+
+// Calculate N dot L for diffuse lighting
+float diffuseLightWeighting = max(dot(normalEye, normalizedLightPos),
+0.0);
+
+vec3 reflectionVector = normalize(reflect(-vectorToLightSource,
+normalEye));
+ 
+vec3 viewVectorEye = normalize(-vertexPositionEye3);
+float rdotv = max(dot(reflectionVector, viewVectorEye), 0.0);
+float specularLightWeighting = pow(rdotv, shininess);
+
+
+float directionalLightWeighting = max(dot(normalEye, normalizedLightPos), 0.0);
+
+
+vLightWeighting = (uAmbientLightColor +
+uDiffuseLightColor * diffuseLightWeighting +
+uSpecularLightColor * specularLightWeighting) + (uDirectionalLightColor * directionalLightWeighting);
+
+
+gl_Position = uPMatrix * uMVMatrix * vec4(aVertexPosition, 1.0);
+vTextureCoordinates = aTextureCoordinates;
+
+ }
+</script>
+<script id="shader-fs" type="x-shader/x-fragment">
+ precision mediump float;
+ varying vec2 vTextureCoordinates;
+ varying vec3 vLightWeighting;
+ uniform sampler2D uSampler;
+ void main() {
+ vec4 texelColor = texture2D(uSampler, vTextureCoordinates);
+ gl_FragColor = vec4(vLightWeighting.rgb * texelColor.rgb,
+texelColor.a);
+}
+</script>
+
+<script type="text/javascript">
+
+// globals
+var gl;
+var pwgl = {}; 
+pwgl.ongoingImageLoads = []; 
+var canvas;
+
+// variables for translations and rotations
+var transY = 0, transZ=0, transX = 0;
+var xRot =yRot =zRot =xOffs = yOffs = drag = 0;
+
+// Keep track of pressed down keys in a list
+pwgl.listOfPressedKeys = []; 
+
+function createGLContext(canvas) {
+var names = ["webgl", "experimental-webgl"];
+var context = null;
+for (var i=0; i < names.length; i++) {
+try {
+context = canvas.getContext(names[i]);
+} catch(e) {}
+if (context) {
+break;
+}
+}
+if (context) {
+context.viewportWidth = canvas.width;
+context.viewportHeight = canvas.height;
+} else {
+alert("Failed to create WebGL context!");
+}
+return context;
+}
+
+function loadShaderFromDOM(id) {
+var shaderScript = document.getElementById(id);
+
+if (!shaderScript) {
+return null;
+}
+
+
+var shaderSource = "";
+var currentChild = shaderScript.firstChild;
+while (currentChild) {
+if (currentChild.nodeType == 3) { 
+shaderSource += currentChild.textContent;
+}
+currentChild = currentChild.nextSibling;
+}
+
+var shader;
+if (shaderScript.type == "x-shader/x-fragment") {
+shader = gl.createShader(gl.FRAGMENT_SHADER);
+} else if (shaderScript.type == "x-shader/x-vertex") {
+shader = gl.createShader(gl.VERTEX_SHADER);
+} else {
+return null;
+}
+
+gl.shaderSource(shader, shaderSource);
+gl.compileShader(shader);
+if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS) 
+&&!gl.isContextLost()) {
+alert(gl.getShaderInfoLog(shader));
+return null;
+} 
+return shader;
+}
+
+function setupShaders() {
+var vertexShader = loadShaderFromDOM("shader-vs");
+var fragmentShader = loadShaderFromDOM("shader-fs");
+var shaderProgram = gl.createProgram();
+gl.attachShader(shaderProgram, vertexShader);
+gl.attachShader(shaderProgram, fragmentShader);
+gl.linkProgram(shaderProgram);
+
+if (!gl.getProgramParameter(shaderProgram, gl.LINK_STATUS) 
+&&!gl.isContextLost()) {
+alert("Failed to link shaders: " + 
+gl.getProgramInfoLog(shaderProgram));
+}
+
+gl.useProgram(shaderProgram);
+
+pwgl.vertexPositionAttributeLoc = gl.getAttribLocation(shaderProgram, 
+"aVertexPosition"); 
+pwgl.vertexTextureAttributeLoc = gl.getAttribLocation(shaderProgram, 
+"aTextureCoordinates");
+pwgl.uniformMVMatrixLoc = gl.getUniformLocation(shaderProgram, 
+"uMVMatrix");
+pwgl.uniformProjMatrixLoc = gl.getUniformLocation(shaderProgram, 
+"uPMatrix");
+pwgl.uniformSamplerLoc = gl.getUniformLocation(shaderProgram, 
+"uSampler");
+
+pwgl.uniformViewMatrixLoc = gl.getUniformLocation(shaderProgram, 
+"uVMatrix"); 
+
+pwgl.uniformNormalMatrixLoc = gl.getUniformLocation(shaderProgram, 
+"uNMatrix"); 
+pwgl.vertexNormalAttributeLoc = gl.getAttribLocation(shaderProgram, 
+"aVertexNormal");
+pwgl.uniformLightPositionLoc =gl.getUniformLocation(shaderProgram, 
+"uLightPosition");
+pwgl.uniformAmbientLightColorLoc = gl.getUniformLocation(shaderProgram, 
+"uAmbientLightColor");  
+pwgl.uniformDiffuseLightColorLoc = gl.getUniformLocation(shaderProgram, 
+"uDiffuseLightColor");
+pwgl.uniformSpecularLightColorLoc = gl.getUniformLocation(shaderProgram, 
+"uSpecularLightColor");
+pwgl.uniformDirectionalLightColorLoc = gl.getUniformLocation(shaderProgram, "uDirectionalLightColor");
+gl.enableVertexAttribArray(pwgl.vertexNormalAttributeLoc);
+gl.enableVertexAttribArray(pwgl.vertexPositionAttributeLoc);
+gl.enableVertexAttribArray(pwgl.vertexTextureAttributeLoc);
+
+pwgl.modelViewMatrix = mat4.create(); 
+pwgl.viewMatrix = mat3.create();
+pwgl.projectionMatrix = mat4.create();
+pwgl.modelViewMatrixStack = [];
+}
+
+function pushModelViewMatrix() {
+var copyToPush = mat4.create(pwgl.modelViewMatrix);
+pwgl.modelViewMatrixStack.push(copyToPush);
+}
+
+function popModelViewMatrix() {
+if (pwgl.modelViewMatrixStack.length == 0) {
+throw "Error popModelViewMatrix() - Stack was empty ";
+}
+pwgl.modelViewMatrix = pwgl.modelViewMatrixStack.pop();
+}
+
+function setupCubeBuffers() {
+
+//Vertex data
+  pwgl.cubeVertexPositionBuffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, pwgl.cubeVertexPositionBuffer);
+  var cubeVertexPosition = [
+       // Front face
+       1.0,  1.0,  1.0, //v0
+      -1.0,  1.0,  1.0, //v1
+      -1.0, -1.0,  1.0, //v2
+       1.0, -1.0,  1.0, //v3
+
+       // Back face
+       1.0,  1.0, -1.0, //v4
+      -1.0,  1.0, -1.0, //v5
+      -1.0, -1.0, -1.0, //v6
+       1.0, -1.0, -1.0, //v7
+
+       // Left face
+      -1.0,  1.0,  1.0, //v8
+      -1.0,  1.0, -1.0, //v9
+      -1.0, -1.0, -1.0, //v10
+      -1.0, -1.0,  1.0, //v11
+
+       // Right face
+       1.0,  1.0,  1.0, //12
+       1.0, -1.0,  1.0, //13
+       1.0, -1.0, -1.0, //14
+       1.0,  1.0, -1.0, //15
+
+        // Top face
+        1.0,  1.0,  1.0, //v16
+        1.0,  1.0, -1.0, //v17
+       -1.0,  1.0, -1.0, //v18
+       -1.0,  1.0,  1.0, //v19
+
+        // Bottom face
+        1.0, -1.0,  1.0, //v20
+        1.0, -1.0, -1.0, //v21
+       -1.0, -1.0, -1.0, //v22
+       -1.0, -1.0,  1.0, //v23
+  	];
+  
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(cubeVertexPosition),
+                gl.STATIC_DRAW);
+  pwgl.CUBE_VERTEX_POS_BUF_ITEM_SIZE = 3;
+  pwgl.CUBE_VERTEX_POS_BUF_NUM_ITEMS = 24;
+
+// Index data for drawing order
+  pwgl.cubeVertexIndexBuffer = gl.createBuffer();
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, pwgl.cubeVertexIndexBuffer);
+  
+  var cubeVertexIndices = [
+            0, 1, 2,      0, 2, 3,    // Front face
+            4, 6, 5,      4, 7, 6,    // Back face
+            8, 9, 10,     8, 10, 11,  // Left face
+            12, 13, 14,   12, 14, 15, // Right face
+            16, 17, 18,   16, 18, 19, // Top face
+            20, 22, 21,   20, 23, 22  // Bottom face
+        ];
+
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new 
+Uint16Array(cubeVertexIndices), gl.STATIC_DRAW);
+  pwgl.CUBE_VERTEX_INDEX_BUF_ITEM_SIZE = 1;
+  pwgl.CUBE_VERTEX_INDEX_BUF_NUM_ITEMS = 36;
+
+// Texture mapping data
+  pwgl.cubeVertexTextureCoordinateBuffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, pwgl.cubeVertexTextureCoordinateBuffer);
+  var textureCoordinates = [
+    //Front face
+    0.0, 0.0, //v0
+    1.0, 0.0, //v1
+    1.0, 1.0, //v2
+    0.0, 1.0, //v3
+    
+    // Back face
+    0.0, 1.0, //v4
+    1.0, 1.0, //v5
+    1.0, 0.0, //v6
+    0.0, 0.0, //v7
+    
+    // Left face
+    0.0, 1.0, //v1
+    1.0, 1.0, //v5
+    1.0, 0.0, //v6
+    0.0, 0.0, //v2
+    
+    // Right face
+    0.0, 1.0, //v0
+    1.0, 1.0, //v3
+    1.0, 0.0, //v7
+    0.0, 0.0, //v4
+    
+    // Top face
+    0.0, 1.0, //v0
+    1.0, 1.0, //v4
+    1.0, 0.0, //v5
+    0.0, 0.0, //v1
+    
+    // Bottom face
+    0.0, 1.0, //v3
+    1.0, 1.0, //v7
+    1.0, 0.0, //v6
+    0.0, 0.0, //v2
+  ];
+  
+  gl.bufferData(gl.ARRAY_BUFFER, new 
+Float32Array(textureCoordinates),gl.STATIC_DRAW);
+  pwgl.CUBE_VERTEX_TEX_COORD_BUF_ITEM_SIZE = 2;
+  pwgl.CUBE_VERTEX_TEX_COORD_BUF_NUM_ITEMS = 24;
+
+
+  
+// Normal data
+  pwgl.cubeVertexNormalBuffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, pwgl.cubeVertexNormalBuffer);
+  var cubeVertexNormals = [
+       // Front face
+       0.0,  0.0,  1.0, //v0
+       0.0,  0.0,  1.0, //v1
+       0.0,  0.0,  1.0, //v2
+       0.0,  0.0,  1.0, //v3
+
+       // Back face
+       0.0,  0.0, -1.0, //v4
+       0.0,  0.0, -1.0, //v5
+       0.0,  0.0, -1.0, //v6
+       0.0,  0.0, -1.0, //v7
+
+      // Left face
+      -1.0,  0.0,  0.0, //v1
+      -1.0,  0.0,  0.0, //v5
+      -1.0,  0.0,  0.0, //v6
+      -1.0,  0.0,  0.0, //v2
+
+      // Right face
+      1.0,  0.0,  0.0, //0
+      1.0,  0.0,  0.0, //3
+      1.0,  0.0,  0.0, //7
+      1.0,  0.0,  0.0, //4
+
+      // Top face
+      0.0,  1.0,  0.0, //v0
+      0.0,  1.0,  0.0, //v4
+      0.0,  1.0,  0.0, //v5
+      0.0,  1.0,  0.0, //v1
+
+      // Bottom face
+      0.0, -1.0,  0.0, //v3
+      0.0, -1.0,  0.0, //v7
+      0.0, -1.0,  0.0, //v6
+      0.0, -1.0,  0.0, //v2
+];
+
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(cubeVertexNormals),
+gl.STATIC_DRAW);
+  pwgl.CUBE_VERTEX_NORMAL_BUF_ITEM_SIZE = 3;
+  pwgl.CUBE_VERTEX_NORMAL_BUF_NUM_ITEMS = 24;
+
+
+}
+
+function setupMainCubeBuffers() {
+// Main cube borrows vertex coordinates, index data and normal data from the setupCubeBuffers function
+
+// Texture coordinates
+pwgl.mainCubeVertexTextureCoordinateBuffer = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, pwgl.mainCubeVertexTextureCoordinateBuffer);
+//160x160 gold
+var textureCoordinates = [
+    //Front face
+    0.5, 1.0, 
+    1.0, 1.0, 
+    1.0, 0.5, 
+    0.5, 0.5, 
+    // Back face
+    0.5, 1.0, 
+    1.0, 1.0, 
+    1.0, 0.5, 
+    0.5, 0.5, 
+	// Left face
+     0.0, 0.4, 
+    0.4, 0.4, 
+    0.4, 0.0, 
+    0.0, 0.0, 
+    // Right face
+    0.0, 0.4, 
+    0.4, 0.4, 
+    0.4, 0.0, 
+    0.0, 0.0, 
+    // Top face
+    0.0, 0.4, 
+    0.4, 0.4, 
+    0.4, 0.0, 
+    0.0, 0.0, 
+    // Bottom face
+    0.0, 0.4, 
+    0.4, 0.4, 
+    0.4, 0.0, 
+    0.0, 0.0, 
+];
+
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(textureCoordinates),
+gl.STATIC_DRAW);
+pwgl.MAIN_CUBE_VERTEX_TEX_COORD_BUF_ITEM_SIZE = 2;
+pwgl.MAIN_CUBE_VERTEX_TEX_COORD_BUF_NUM_ITEMS = 24;
+}
+
+function setupCylinderBuffers(){
+
+// Cylinder drawn by drawing 2 circles and connecting them with triangle strips
+
+var r = 1;
+var m=11;
+h = 1; 
+
+//vertex coordinates for first circle
+pwgl.cylinderCircleVertexPositionBuffer = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, pwgl.cylinderCircleVertexPositionBuffer);
+var cylinderCircleVertexPosition=[];
+
+cylinderCircleVertexPosition.push(0);
+cylinderCircleVertexPosition.push(h/2); //y coordinate at half the height of the cylinder
+cylinderCircleVertexPosition.push(0);
+segmentAngle = Math.PI*2/m;
+
+for (var i=0; i <= m; i++) {
+		angle = segmentAngle * (i);
+
+		x= r*Math.cos(angle);
+		z= r * Math.sin(angle);
+		
+		cylinderCircleVertexPosition.push(x);
+		cylinderCircleVertexPosition.push(h/2);
+		cylinderCircleVertexPosition.push(z);	
+	}
+
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(cylinderCircleVertexPosition),
+gl.STATIC_DRAW);
+
+pwgl.CYLINDER_CIRCLE_VERTEX_POS_BUFFER_ITEM_SIZE = 3;
+pwgl.CYLINDER_CIRCLE_VERTEX_POS_BUFFER_NUM_ITEMS = (m+2);	
+
+// Texture mapping
+pwgl.cylinderCircleTextureCoordinateBuffer = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, pwgl.cylinderCircleTextureCoordinateBuffer);
+
+var cylinderCircleTextureCoordinate = [];
+ cylinderCircleTextureCoordinate.push(0);
+cylinderCircleTextureCoordinate.push(0);
+cylinderCircleTextureCoordinate.push(0);
+ for (var i=0; i <= m; i ++){
+
+	cylinderCircleTextureCoordinate.push(1);
+
+	cylinderCircleTextureCoordinate.push(1);
+}
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(cylinderCircleTextureCoordinate), gl.STATIC_DRAW);
+pwgl.CYLINDER_CIRCLE_TEXTURE_COORD_BUF_ITEM_SIZE = 2;
+pwgl.CYLINDER_CIRCLE_TEXTURE_COORD_BUF_NUM_ITEMS = (m+3);
+
+// Circle 2 vertes coordinates 
+pwgl.cylinderCircle2VertexPositionBuffer = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, pwgl.cylinderCircle2VertexPositionBuffer);
+var cylinderCircle2VertexPosition = [];
+cylinderCircle2VertexPosition = cylinderCircle2VertexPosition.concat(cylinderCircleVertexPosition);
+
+// Change the y coordinates for the original circle to -height/2
+for (i=1; i<=(cylinderCircleVertexPosition.length); i+=3)
+{
+	cylinderCircle2VertexPosition[i]=-h/2; 
+
+}
+
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(cylinderCircle2VertexPosition),
+gl.STATIC_DRAW);
+
+// Vertex coordinates for triangle strip
+pwgl.stripVertexPositionBuffer = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, pwgl.stripVertexPositionBuffer);
+var stripVertexPosition=[];
+
+// loops through the list of circle vertices, adding them to a list one after another
+for (i=3; i<cylinderCircleVertexPosition.length; i+=3)
+{
+	x1=cylinderCircleVertexPosition[i];
+	y1=cylinderCircleVertexPosition[i+1];
+	z1=cylinderCircleVertexPosition[i+2];
+	x2=cylinderCircle2VertexPosition[i];
+	y2=cylinderCircle2VertexPosition[i+1];
+	z2=cylinderCircle2VertexPosition[i+2];
+	
+	stripVertexPosition.push(x1, y1, z1, x2, y2, z2);
+}
+
+
+
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(stripVertexPosition),
+gl.STATIC_DRAW);
+
+pwgl.STRIP_VERTEX_POSITION_ITEM_SIZE = 3;
+pwgl.STRIP_VERTEX_POSITION_LENGTH = (stripVertexPosition.length/3);
+
+
+
+
+}
+
+function setupSphereBuffers(){
+
+
+//using gl.Triangles (drawElements) to draw a sphere
+pwgl.sphereVertexPositionBuffer = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, pwgl.sphereVertexPositionBuffer);
+var sphereVertexPosition=[];
+var r = 20;
+var m=50;
+var n=50;
+
+
+
+for (var i=0; i <= m; i++) {
+	for (var j=0; j <=n; j++){
+		//calculate x, y and z here
+		
+		x=r * (Math.sin(i*Math.PI/m)) * (Math.cos(2*j*Math.PI/n));
+
+		y=r * Math.cos(i*Math.PI/m);
+
+		z=r * Math.sin(i*Math.PI/m)* Math.sin(2*j*Math.PI/n);
+	
+		
+		sphereVertexPosition.push(x);
+		sphereVertexPosition.push(y);
+		sphereVertexPosition.push(z);
+		
+		
+		// 1st row of vertices (i=0)
+		// 2nd row of vertices (i=1)
+		// etc...
+		}
+	} 
+
+	
+
+
+
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(sphereVertexPosition),
+gl.STATIC_DRAW);
+
+pwgl.SPHERE_VERTEX_POS_BUFFER_ITEM_SIZE = 3;	
+pwgl.SPHERE_VERTEX_POS_BUFFER_NUM_ITEMS = (m+1)*(n+1);	
+	
+// Index data for drawing order
+pwgl.sphereIndexPositionBuffer = gl.createBuffer();
+gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, pwgl.sphereIndexPositionBuffer);
+	
+var sphereIndexPosition=[];
+for (var i=0; i < m; i ++){
+	for (var j=0; j < n; j++){
+	var v1 = i*(n+1) + j;
+	var v2 = v1+n+1;
+	var v3 = v1+1;
+	var v4 = v2 + 1;
+	
+	//triangle 1
+	sphereIndexPosition.push(v1);
+	sphereIndexPosition.push(v2);
+	sphereIndexPosition.push(v3);
+	//triangle 2
+	sphereIndexPosition.push(v3);
+	sphereIndexPosition.push(v2);
+	sphereIndexPosition.push(v4);	
+	
+	
+	}	
+}
+
+
+gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(sphereIndexPosition),
+gl.STATIC_DRAW);
+
+pwgl.SPHERE_INDEX_POS_BUF_ITEM_SIZE= 1;  
+pwgl.SPHERE_INDEX_POS_NUM_ITEMS= 6*m*n;   
+
+// Texture mapping
+pwgl.sphereTextureCoordinateBuffer = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, pwgl.sphereTextureCoordinateBuffer);
+
+var sphereTextureCoordinate = [];
+ 
+ for (var i=0; i <= m; i ++){
+	for (var j=0; j <= n; j++){
+
+	sphereTextureCoordinate.push(1-(j/m));
+	sphereTextureCoordinate.push(1-(i/m));
+	}	
+}
+
+
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(sphereTextureCoordinate), gl.STATIC_DRAW);
+pwgl.SPHERE_TEXTURE_COORD_BUF_ITEM_SIZE = 2;
+pwgl.SPHERE_TEXTURE_COORD_BUF_NUM_ITEMS = (m+1)*(n+1);
+
+// Normal data for lighting
+pwgl.sphereNormalBuffer = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, pwgl.sphereNormalBuffer);
+
+var sphereNormalData = [];
+for (var i=0; i <=m; i++){
+	for (var j=0; j<=n; j++){
+	
+
+	nx=(Math.sin((i*Math.PI)/m))*(Math.cos((2*j*Math.PI)/n));
+
+	ny=(Math.cos((i*Math.PI)/m));
+
+	nz=(Math.sin((i*Math.PI)/m))*(Math.sin((2*j*Math.PI)/n));
+	
+	sphereNormalData.push(nx);
+	sphereNormalData.push(ny);
+	sphereNormalData.push(nz);
+	}
+
+	
+}	
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(sphereNormalData), gl.STATIC_DRAW);
+pwgl.SPHERE_NORMAL_BUF_ITEM_SIZE = 3;
+pwgl.SPHERE_NORMAL_BUF_NUM_ITEMS = (j+1)*(m+1);
+	
+
+}
+
+
+
+function loadImageForTexture(url, texture) {
+var image = new Image();
+image.onload = function() {
+		pwgl.ongoingImageLoads.splice(
+		pwgl.ongoingImageLoads.indexOf(image), 1);
+textureFinishedLoading(image, texture);
+}
+pwgl.ongoingImageLoads.push(image);
+image.src = url;
+}
+
+function textureFinishedLoading(image, texture) {
+gl.bindTexture(gl.TEXTURE_2D, texture);
+gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, 
+					gl.UNSIGNED_BYTE, image);
+gl.generateMipmap(gl.TEXTURE_2D);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, 
+					gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, 
+					gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, 
+					gl.MIRRORED_REPEAT);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, 
+					gl.MIRRORED_REPEAT);
+gl.bindTexture(gl.TEXTURE_2D, null); 
+}
+
+function setupTextures() {
+
+pwgl.earthTexture = gl.createTexture();
+loadImageForTexture("Textures/earth.jpg", pwgl.earthTexture);
+
+pwgl.mainCubeTexture = gl.createTexture();
+loadImageForTexture("Textures/mainCube.jpg", pwgl.mainCubeTexture);
+
+pwgl.solarPanelTexture = gl.createTexture();
+loadImageForTexture("Textures/solarPanel.jpg", pwgl.solarPanelTexture);
+
+pwgl.cylinderTexture = gl.createTexture();
+loadImageForTexture("Textures/cylinder.jpg", pwgl.cylinderTexture);
+
+pwgl.dishTexture = gl.createTexture();
+loadImageForTexture("Textures/dish.jpg", pwgl.dishTexture);
+}
+
+function uploadNormalMatrixToShader() {
+  var normalMatrix = mat3.create();
+  mat4.toInverseMat3(pwgl.modelViewMatrix, normalMatrix);
+  mat3.transpose(normalMatrix);
+  gl.uniformMatrix3fv(pwgl.uniformNormalMatrixLoc, false, normalMatrix);
+
+}
+
+function setupLights() {
+  gl.uniform3fv(pwgl.uniformLightPositionLoc, [100.0, 100.0, 100.0]);
+  gl.uniform3fv(pwgl.uniformAmbientLightColorLoc, [0.2, 0.2, 0.2]);
+  gl.uniform3fv(pwgl.uniformDiffuseLightColorLoc, [0.3, 0.3, 0.3]);
+  gl.uniform3fv(pwgl.uniformSpecularLightColorLoc, [0.1, 0.1, 0.1]);
+  gl.uniform3fv(pwgl.uniformDirectionalLightColorLoc, [1, 1, 1]);
+}
+
+
+
+function setupBuffers() {
+
+setupCubeBuffers();
+setupSphereBuffers();
+setupMainCubeBuffers();
+setupCylinderBuffers();
+}
+
+
+function uploadModelViewMatrixToShader() {
+gl.uniformMatrix4fv(pwgl.uniformMVMatrixLoc, false, 
+pwgl.modelViewMatrix);
+}
+
+function uploadProjectionMatrixToShader() {
+gl.uniformMatrix4fv(pwgl.uniformProjMatrixLoc, false, 
+pwgl.projectionMatrix);
+}
+
+function uploadViewMatrixToShader(){
+gl.uniformMatrix3fv(pwgl.uniformViewMatrixLoc, false, pwgl.viewMatrix);
+
+}
+function drawCylinder(texture){
+// Bind triangle strip vertex coordinates
+gl.bindBuffer(gl.ARRAY_BUFFER, pwgl.stripVertexPositionBuffer);
+gl.vertexAttribPointer(pwgl.vertexPositionAttributeLoc, pwgl.STRIP_VERTEX_POSITION_ITEM_SIZE, gl.FLOAT, false, 0, 0);
+// Draw triangle strip between circles 
+gl.drawArrays(gl.TRIANGLE_STRIP, 0, pwgl.STRIP_VERTEX_POSITION_LENGTH);
+
+// bind Texture 
+gl.bindBuffer(gl.ARRAY_BUFFER, pwgl.cylinderCircleTextureCoordinateBuffer);
+gl.vertexAttribPointer(pwgl.vertexTextureAttributeLoc,pwgl.CYLINDER_CIRCLE_TEXTURE_COORD_BUF_ITEM_SIZE, 
+			gl.FLOAT, false, 0, 0);
+gl.activeTexture(gl.TEXTURE2);
+gl.bindTexture(gl.TEXTURE_2D, texture);
+
+
+}
+
+
+
+function drawCube(texture) {
+
+  // Bind position buffer
+ gl.bindBuffer(gl.ARRAY_BUFFER, pwgl.cubeVertexPositionBuffer);
+  gl.vertexAttribPointer(pwgl.vertexPositionAttributeLoc, 
+               		pwgl.CUBE_VERTEX_POS_BUF_ITEM_SIZE, 
+gl.FLOAT, false, 0, 0);
+
+  // Bind normal buffer
+  gl.bindBuffer(gl.ARRAY_BUFFER, pwgl.cubeVertexNormalBuffer);
+  gl.vertexAttribPointer(pwgl.vertexNormalAttributeLoc, 
+                         pwgl.CUBE_VERTEX_NORMAL_BUF_ITEM_SIZE,
+                         gl.FLOAT, false, 0, 0);
+
+  // bind texture coordinate buffer
+  gl.bindBuffer(gl.ARRAY_BUFFER, pwgl.cubeVertexTextureCoordinateBuffer);
+  gl.vertexAttribPointer(pwgl.vertexTextureAttributeLoc,
+                         pwgl.CUBE_VERTEX_TEX_COORD_BUF_ITEM_SIZE, 
+ 			     gl.FLOAT, false, 0, 0);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, texture);
+
+  // Bind index buffer and draw cube
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, pwgl.cubeVertexIndexBuffer);
+  gl.drawElements(gl.TRIANGLES, pwgl.CUBE_VERTEX_INDEX_BUF_NUM_ITEMS,
+gl.UNSIGNED_SHORT, 0);
+}
+
+function drawMainCube(texture) {
+
+// Bind vertex coordinates (the same that drawCube uses)
+gl.bindBuffer(gl.ARRAY_BUFFER, pwgl.cubeVertexPositionBuffer);
+gl.vertexAttribPointer(pwgl.vertexPositionAttributeLoc, 
+              	pwgl.CUBE_VERTEX_POS_BUF_ITEM_SIZE, 
+				gl.FLOAT, false, 0, 0);
+
+// Bind normal data (the same that drawCube uses)
+gl.bindBuffer(gl.ARRAY_BUFFER, pwgl.cubeVertexNormalBuffer);
+gl.vertexAttribPointer(pwgl.vertexNormalAttributeLoc, 
+                         pwgl.CUBE_VERTEX_NORMAL_BUF_ITEM_SIZE,
+                         gl.FLOAT, false, 0, 0);
+
+
+// Bind texture coordinate buffer (uses its own texture coordinates)
+gl.bindBuffer(gl.ARRAY_BUFFER, pwgl.mainCubeVertexTextureCoordinateBuffer);
+gl.vertexAttribPointer(pwgl.vertexTextureAttributeLoc,
+                         pwgl.MAIN_CUBE_VERTEX_TEX_COORD_BUF_ITEM_SIZE,gl.FLOAT,false, 0, 0);
+gl.activeTexture(gl.TEXTURE0);
+gl.bindTexture(gl.TEXTURE_2D, texture);
+
+// Bind index buffer (same as drawCube) and draw cube
+gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, pwgl.cubeVertexIndexBuffer);
+gl.drawElements(gl.TRIANGLES, pwgl.CUBE_VERTEX_INDEX_BUF_NUM_ITEMS,
+gl.UNSIGNED_SHORT, 0);
+}
+
+function drawSphere(texture, dish) {
+//if dish=1, sphere is drawn, if it is 2 a dish is drawn
+// dish determines the number of vertices drawn
+
+var vertices = 1;
+
+if (dish == 2)
+{
+	vertices = 2;
+}
+else
+{
+	vertices = 1;
+}
+
+
+
+// Bind position buffer
+gl.bindBuffer(gl.ARRAY_BUFFER, pwgl.sphereVertexPositionBuffer);
+gl.vertexAttribPointer(pwgl.vertexPositionAttributeLoc, 
+           	pwgl.SPHERE_VERTEX_POS_BUFFER_ITEM_SIZE, 
+			gl.FLOAT, false, 0, 0);
+
+// Normal buffer
+gl.bindBuffer(gl.ARRAY_BUFFER, pwgl.sphereNormalBuffer);
+gl.vertexAttribPointer(pwgl.vertexNormalAttributeLoc, pwgl.SPHERE_NORMAL_BUF_ITEM_SIZE, gl.FLOAT, false, 0, 0);
+
+
+
+// Bind texture coordinate buffer
+gl.bindBuffer(gl.ARRAY_BUFFER, pwgl.sphereTextureCoordinateBuffer);
+gl.vertexAttribPointer(pwgl.vertexTextureAttributeLoc,pwgl.SPHERE_TEXTURE_COORD_BUF_ITEM_SIZE, 
+			gl.FLOAT, false, 0, 0);
+gl.activeTexture(gl.TEXTURE1);
+gl.bindTexture(gl.TEXTURE_2D, texture);
+
+//bind index buffer and draw
+gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, pwgl.sphereIndexPositionBuffer);
+gl.drawElements(gl.TRIANGLES, 
+			pwgl.SPHERE_INDEX_POS_NUM_ITEMS/vertices,
+			gl.UNSIGNED_SHORT, 0);
+			
+
+}
+
+function handleContextLost(event) {
+event.preventDefault();
+cancelRequestAnimFrame(pwgl.requestId);
+
+for (var i = 0; i < pwgl.ongoingImageLoads.length; i++) {
+pwgl.ongoingImageLoads[i].onload = undefined;
+}
+pwgl.ongoingImageLoads = [];
+}
+
+function handleContextRestored(event) {
+init();
+pwgl.requestId = requestAnimFrame(draw,canvas);
+}
+
+function init() {
+// Initialization for first startup and when context restores
+setupShaders(); 
+setupBuffers(); 
+setupLights();
+setupTextures();
+gl.clearColor(0.0, 0.0, 0.0, 1.0);
+gl.enable(gl.DEPTH_TEST);
+
+// Set some initial variables
+// cube
+pwgl.boxX = 0.0;
+pwgl.boxY = 0.0;
+pwgl.boxZ = 0.0;
+pwgl.boxCircleRadius = 30;
+pwgl.angle = 0;
+pwgl.rotationSpeed = 5000; //5000
+// earth
+pwgl.earthX = 0.0;
+pwgl.earthY = 0.0;
+pwgl.earthZ = 0.0;
+pwgl.earthAngle = 0;
+
+
+pwgl.animationStartTime = undefined;
+pwgl.nbrOfFramesForFPS = 0;
+pwgl.previousFrameTimeStamp = Date.now();
+
+gl.viewport(0, 0, gl.viewportWidth, gl.viewportHeight);
+gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+mat4.perspective(60, gl.viewportWidth / gl.viewportHeight, 
+1, 100.0, pwgl.projectionMatrix);
+mat4.identity(pwgl.modelViewMatrix);
+mat4.lookAt([0,0,60],[0, 0, 0], [0, 1,0], pwgl.modelViewMatrix);//8,12,60
+mat4.identity(pwgl.viewMatrix);
+mat4.lookAt([0,0,60],[0, 0, 0], [0, 1,0], pwgl.viewMatrix);
+
+}
+
+function draw() { 
+
+
+pwgl.requestId = requestAnimFrame(draw);
+var currentTime = Date.now();
+handlePressedDownKeys();
+
+// Update FPS
+if(currentTime - pwgl.previousFrameTimeStamp >= 1000) {
+pwgl.fpsCounter.innerHTML = pwgl.nbrOfFramesForFPS;
+pwgl.nbrOfFramesForFPS = 0;
+pwgl.previousFrameTimeStamp = currentTime;
+}
+
+
+mat4.translate(pwgl.modelViewMatrix, [transX, transY, transZ],
+pwgl.modelViewMatrix);
+mat4.rotateX(pwgl.modelViewMatrix, xRot/50, pwgl.modelViewMatrix);
+mat4.rotateY(pwgl.modelViewMatrix, yRot/50, pwgl.modelViewMatrix);
+mat4.rotateZ(pwgl.modelViewMatrix, zRot/50, pwgl.modelViewMatrix);
+yRot = xRot = zRot =transY=transZ=transX=0;
+
+uploadModelViewMatrixToShader();
+uploadProjectionMatrixToShader();
+
+gl.uniform1i(pwgl.uniformSamplerLoc, 0);
+gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+if (currentTime === undefined) {
+currentTime = Date.now();
+}
+if (pwgl.animationStartTime === undefined) {
+pwgl.animationStartTime = currentTime;
+}
+// Calculate main cube coordinates
+if (pwgl.boxY != 0) {
+pwgl.boxY = 0;
+} else {
+pwgl.angle=(currentTime - pwgl.animationStartTime)/
+pwgl.rotationSpeed*2*Math.PI % (2*Math.PI); 
+
+
+//this is in radians
+
+pwgl.boxX = Math.cos(pwgl.angle) * pwgl.boxCircleRadius;
+pwgl.boxZ = Math.sin(pwgl.angle) * pwgl.boxCircleRadius;
+
+}
+
+// Calculate earth rotation
+pwgl.earthAngle = (currentTime - pwgl.animationStartTime)
+/10000*2*Math.PI % (2*Math.PI); //10000
+
+
+// Use the main cube angle (pwgl.angle) to calculate translations for other objects
+pwgl.solarPanel_0_Angle = pwgl.angle + 4/pwgl.boxCircleRadius;
+//divide by radius so that there is an inverse relationship between the current angle and the radius
+// (keeps the solar panels from drifting away from cube when radius increased)
+
+pwgl.solarPanel_0_X = Math.cos(pwgl.solarPanel_0_Angle) * (pwgl.boxCircleRadius+0.2);
+pwgl.solarPanel_0_Z = Math.sin(pwgl.solarPanel_0_Angle) * (pwgl.boxCircleRadius+0.2);
+
+pwgl.solarPanel_1_Angle = pwgl.angle - 4/pwgl.boxCircleRadius;
+
+pwgl.solarPanel_1_X = Math.cos(pwgl.solarPanel_1_Angle) * (pwgl.boxCircleRadius+0.2);
+pwgl.solarPanel_1_Z = Math.sin(pwgl.solarPanel_1_Angle) * (pwgl.boxCircleRadius+0.2);
+
+// Connectors are the cylinders 
+
+pwgl.connector_0_Angle = pwgl.angle +1/pwgl.boxCircleRadius;
+pwgl.connector_0_X = Math.cos(pwgl.connector_0_Angle) * (pwgl.boxCircleRadius+0.1);
+pwgl.connector_0_Z = Math.sin(pwgl.connector_0_Angle) * (pwgl.boxCircleRadius+0.1);
+
+pwgl.connector_1_Angle = pwgl.angle -1/pwgl.boxCircleRadius;
+pwgl.connector_1_X = Math.cos(pwgl.connector_1_Angle) * (pwgl.boxCircleRadius+0.1);
+pwgl.connector_1_Z = Math.sin(pwgl.connector_1_Angle) * (pwgl.boxCircleRadius+0.1);
+
+pwgl.dishX = Math.cos(pwgl.angle) * (pwgl.boxCircleRadius-5);
+pwgl.dishZ = Math.sin(pwgl.angle) * (pwgl.boxCircleRadius-5);
+
+pwgl.dish_connector_X = Math.cos(pwgl.angle) * (pwgl.boxCircleRadius-1.5);
+pwgl.dish_connector_Z = Math.sin(pwgl.angle) * (pwgl.boxCircleRadius-1.5);
+
+
+uploadViewMatrixToShader();
+pushModelViewMatrix();
+
+
+// Draw main cube, rotating it at a -pwgl.angle so that it always faces 0,0,0
+mat4.translate(pwgl.modelViewMatrix, [pwgl.boxX, 0, pwgl.boxZ],
+pwgl.modelViewMatrix);
+mat4.rotateY(pwgl.modelViewMatrix, -pwgl.angle, pwgl.modelViewMatrix);
+//mat4.scale(pwgl.modelViewMatrix, [1,1,1], pwgl.modelViewMatrix);
+uploadNormalMatrixToShader();
+uploadModelViewMatrixToShader();
+drawMainCube(pwgl.mainCubeTexture);
+popModelViewMatrix();
+
+// Draw solar panels
+pushModelViewMatrix();
+mat4.translate(pwgl.modelViewMatrix, [pwgl.solarPanel_0_X, 0, pwgl.solarPanel_0_Z],
+pwgl.modelViewMatrix);
+mat4.rotateY(pwgl.modelViewMatrix, -pwgl.angle, pwgl.modelViewMatrix);
+mat4.scale(pwgl.modelViewMatrix, [1, 0.1, 2.5],
+pwgl.modelViewMatrix);
+uploadModelViewMatrixToShader();
+uploadNormalMatrixToShader();
+drawCube(pwgl.solarPanelTexture);
+popModelViewMatrix();
+
+pushModelViewMatrix();
+mat4.translate(pwgl.modelViewMatrix, [pwgl.solarPanel_1_X, 0, pwgl.solarPanel_1_Z],
+pwgl.modelViewMatrix);
+mat4.rotateY(pwgl.modelViewMatrix, -pwgl.angle, pwgl.modelViewMatrix);
+mat4.scale(pwgl.modelViewMatrix, [1, 0.1, 2.5],
+pwgl.modelViewMatrix);
+uploadModelViewMatrixToShader();
+uploadNormalMatrixToShader();
+drawCube(pwgl.solarPanelTexture);
+popModelViewMatrix();
+
+// Draw cylinder connecting main cube and dish
+pushModelViewMatrix();
+mat4.translate(pwgl.modelViewMatrix, [pwgl.dish_connector_X,0, pwgl.dish_connector_Z],
+pwgl.modelViewMatrix);
+mat4.rotateZ(pwgl.modelViewMatrix, Math.PI*1.5, pwgl.modelViewMatrix);
+mat4.rotateX(pwgl.modelViewMatrix, pwgl.angle, pwgl.modelViewMatrix);
+gl.uniform1i(pwgl.uniformSamplerLoc, 2);
+mat4.scale(pwgl.modelViewMatrix, [0.15,1,0.15], pwgl.modelViewMatrix);
+uploadModelViewMatrixToShader();
+uploadNormalMatrixToShader();
+drawCylinder(pwgl.cylinderTexture);
+popModelViewMatrix();
+
+// Draw earth
+pushModelViewMatrix();
+mat4.rotateY(pwgl.modelViewMatrix, pwgl.earthAngle, pwgl.modelViewMatrix);
+uploadModelViewMatrixToShader();
+uploadNormalMatrixToShader();
+gl.uniform1i(pwgl.uniformSamplerLoc, 1);
+drawSphere(pwgl.earthTexture, 1); //1 for sphere, 2 for dish
+popModelViewMatrix();
+
+// Draw the cylinder connecting both solar panels, one is drawn at the center of the main cube
+pushModelViewMatrix();
+mat4.translate(pwgl.modelViewMatrix, [pwgl.boxX,0, pwgl.boxZ],
+pwgl.modelViewMatrix);
+mat4.rotateX(pwgl.modelViewMatrix, Math.PI*0.5, pwgl.modelViewMatrix);
+mat4.rotateZ(pwgl.modelViewMatrix, pwgl.angle, pwgl.modelViewMatrix);
+gl.uniform1i(pwgl.uniformSamplerLoc, 2);
+mat4.scale(pwgl.modelViewMatrix, [0.1,3.4,0.1], pwgl.modelViewMatrix);
+uploadModelViewMatrixToShader();
+uploadNormalMatrixToShader();
+drawCylinder(pwgl.cylinderTexture);
+popModelViewMatrix();
+
+// Draw the dish
+pushModelViewMatrix();
+mat4.translate(pwgl.modelViewMatrix, [pwgl.dishX,0, pwgl.dishZ],
+pwgl.modelViewMatrix);
+mat4.rotateX(pwgl.modelViewMatrix, Math.PI*0.5, pwgl.modelViewMatrix);
+mat4.rotateZ(pwgl.modelViewMatrix, Math.PI*1.5, pwgl.modelViewMatrix);
+mat4.rotateZ(pwgl.modelViewMatrix, pwgl.angle, pwgl.modelViewMatrix);
+//r=20
+mat4.scale(pwgl.modelViewMatrix, [0.2,0.15,0.2], pwgl.modelViewMatrix);
+uploadModelViewMatrixToShader();
+uploadNormalMatrixToShader();
+gl.uniform1i(pwgl.uniformSamplerLoc, 1);
+drawSphere(pwgl.dishTexture, 2);
+popModelViewMatrix();
+
+// Update number of drawn frames to be able to count fps
+pwgl.nbrOfFramesForFPS++;
+}
+
+function handleKeyDown(event) {
+    pwgl.listOfPressedKeys[event.keyCode] = true;
+	console.log(event.keyCode);
+}
+
+function handleKeyUp(event) {
+    pwgl.listOfPressedKeys[event.keyCode] = false;
+}
+
+function handlePressedDownKeys() {
+
+
+if (pwgl.listOfPressedKeys[37]){ //left arrow
+	// decreases orbit radius, limiting at 27
+	pwgl.boxCircleRadius -=0.1;
+	if (pwgl.boxCircleRadius <=27){
+		pwgl.boxCircleRadius =27;
+	}
+	console.log(pwgl.boxCircleRadius);
+}
+if (pwgl.listOfPressedKeys[38]) { //up arrow
+	// speeds up orbit, limiting at 1000 (larger pwgl.rotationSpeed = lower speed)
+	if (pwgl.rotationSpeed > 1000)
+	{
+	pwgl.rotationSpeed -= 10;
+
+	}
+}
+
+if (pwgl.listOfPressedKeys[39]){ //right arrow
+	// increases orbit radius, limiting at 50
+	pwgl.boxCircleRadius += 0.1;
+	
+	if (pwgl.boxCircleRadius >=50){
+		pwgl.boxCircleRadius = 50;
+	
+	}
+}
+
+
+if (pwgl.listOfPressedKeys[40]) { //down arrow
+	// slows orbit, limiting at 5000
+	if (pwgl.rotationSpeed < 5000)
+	{
+	pwgl.rotationSpeed += 10;
+	}
+	}
+	
+
+
+
+}
+
+function mymousedown( ev ){
+drag  = 1;
+xOffs = ev.clientX;  
+yOffs = ev.clientY;
+}
+
+function mymouseup( ev ){
+drag  = 0;
+}
+
+function mymousemove( ev ){
+if ( drag == 0 ) return;
+if ( ev.shiftKey ) {
+transX = (ev.clientX - xOffs)/10;
+} else if (ev.altKey) {
+transY = -(ev.clientY - yOffs)/10;
+} else {
+yRot = - xOffs + ev.clientX;  
+xRot = - yOffs + ev.clientY; 
+}
+xOffs = ev.clientX;   
+yOffs = ev.clientY;
+}
+
+function wheelHandler(ev) {
+if (ev.altKey) transY = -ev.detail/20;
+else transZ =ev.detail/20;
+ev.preventDefault();
+}
+
+function startup() {
+canvas = document.getElementById("myGLCanvas");
+canvas = WebGLDebugUtils.makeLostContextSimulatingCanvas(canvas);
+canvas.addEventListener('webglcontextlost', handleContextLost, false);
+canvas.addEventListener('webglcontextrestored', handleContextRestored,
+false);
+document.addEventListener('keydown', handleKeyDown, false);
+document.addEventListener('keyup', handleKeyUp, false);
+canvas.addEventListener('mousemove', mymousemove, false);
+canvas.addEventListener('mousedown', mymousedown, false);
+canvas.addEventListener('mouseup', mymouseup, false);
+canvas.addEventListener('mousewheel', wheelHandler, false);
+canvas.addEventListener('DOMMouseScroll', wheelHandler, false);
+
+gl = createGLContext(canvas);
+init();
+pwgl.fpsCounter = document.getElementById("fps");
+
+draw();
+}
+
+</script>
+
+</head>
+<body onload="startup();">
+<canvas id="myGLCanvas" width="500" height="500"></canvas>
+<div id="fps-counter"> FPS: <span id="fps">--</span></div>
+</body>
+</html>
+
